@@ -1,0 +1,14 @@
+rules:
+  - id: s07-javascript-eval-inseguro
+    languages:
+      - javascript
+    severity: ERROR
+    message: >-
+      Uso inseguro de eval().
+      Evitar la ejecucion dinamica de codigo no confiable.
+    pattern: eval($INPUT)
+    metadata:
+      category: security
+      cwe:
+        - "CWE-95"
+      confidence: HIGH
