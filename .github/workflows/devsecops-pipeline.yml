@@ -1,0 +1,219 @@
+name: S07 - DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seguridad:
+    name: SAST - SCA - SBOM - Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # ==========================================
+      # 1. PREPARAR ENTORNO
+      # ==========================================
+
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Generar inventario de dependencias
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          mkdir -p reports
+
+      # ==========================================
+      # 2. SAST - SEMGREP
+      # ==========================================
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar Semgrep
+        run: python -m pip install semgrep
+
+      - name: SAST - Analizar codigo con Semgrep
+        id: sast
+        run: |
+          semgrep scan \
+            --config .semgrep/s07-rules.yml \
+            --config p/security-audit \
+            --metrics=off \
+            --json \
+            --output reports/semgrep.json \
+            src/
+
+      # ==========================================
+      # 3. SBOM - CYCLONEDX
+      # ==========================================
+
+      - name: Generar SBOM CycloneDX
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          upload-artifact: false
+
+      # ==========================================
+      # 4. SCA - OWASP DEPENDENCY-CHECK
+      # ==========================================
+
+      - name: SCA - Dependency Check
+        id: sca
+        continue-on-error: true
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: S07-DevSecOps-Lab
+          path: .
+          format: ALL
+          out: reports/sca
+          args: >
+            --failOnCVSS 7
+
+      # ==========================================
+      # 5. PUBLICAR EVIDENCIAS
+      # ==========================================
+
+      - name: Publicar reportes y SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: S07-Reportes-Seguridad
+          path: |
+            reports/
+            sbom.cyclonedx.json
+          if-no-files-found: warn
+
+      # ==========================================
+      # 6. QUALITY GATE
+      # ==========================================
+
+      - name: Quality Gate - HIGH y CRITICAL
+        if: always()
+        env:
+          SCA_OUTCOME: ${{ steps.sca.outcome }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          let failed = false;
+
+          console.log('=== QUALITY GATE S07 ===');
+
+          // SAST: hallazgos ERROR / HIGH / CRITICAL.
+          const sastFile = 'reports/semgrep.json';
+
+          if (!fs.existsSync(sastFile)) {
+            console.error('ERROR: falta reporte Semgrep');
+            failed = true;
+          } else {
+            const sast = JSON.parse(
+              fs.readFileSync(sastFile, 'utf8')
+            );
+
+            const altos = (sast.results || []).filter(r => {
+              const severity = String(
+                r.extra?.severity || ''
+              ).toUpperCase();
+
+              return [
+                'ERROR', 'HIGH', 'CRITICAL'
+              ].includes(severity);
+            });
+
+            console.log('SAST hallazgos altos:', altos.length);
+
+            for (const r of altos) {
+              console.log(
+                r.check_id,
+                r.path,
+                r.start?.line
+              );
+            }
+
+            if (altos.length > 0) failed = true;
+          }
+
+          // SCA: reporte de Dependency-Check.
+          const scaFile =
+            'reports/sca/dependency-check-report.json';
+
+          if (!fs.existsSync(scaFile)) {
+            console.error(
+              'ERROR: falta reporte SCA; el analisis no se completo'
+            );
+            failed = true;
+          } else {
+            const sca = JSON.parse(
+              fs.readFileSync(scaFile, 'utf8')
+            );
+
+            let count = 0;
+
+            for (const dep of sca.dependencies || []) {
+              for (const v of dep.vulnerabilities || []) {
+
+                const scores = [
+                  v.cvssv4?.baseScore,
+                  v.cvssv3?.baseScore,
+                  v.cvssv2?.score
+                ].map(Number).filter(Number.isFinite);
+
+                const cvss = Math.max(0, ...scores);
+
+                const severidad = String(
+                  v.severity || ''
+                ).toUpperCase();
+
+                if (
+                  cvss >= 7 ||
+                  severidad === 'HIGH' ||
+                  severidad === 'CRITICAL'
+                ) {
+                  count++;
+                  console.log(
+                    'SCA:',
+                    v.name,
+                    'CVSS:',
+                    cvss,
+                    'Severidad:',
+                    severidad
+                  );
+                }
+              }
+            }
+
+            console.log('SCA hallazgos altos:', count);
+
+            if (count > 0) failed = true;
+          }
+
+          // Evitar aprobar un escaneo que termino con error.
+          if (process.env.SCA_OUTCOME !== 'success') {
+            console.error(
+              'Dependency-Check termino con resultado no exitoso'
+            );
+            failed = true;
+          }
+
+          if (failed) {
+            console.error('QUALITY GATE: FAILED');
+            process.exit(1);
+          }
+
+          console.log('QUALITY GATE: SUCCESS');
+          NODE
