@@ -1,6 +1,6 @@
 {
   "name": "s07-devsecops-lab",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Laboratorio academico SAST, SCA y SBOM",
   "main": "src/app.js",
@@ -8,6 +8,6 @@
     "start": "node src/app.js"
   },
   "dependencies": {
-    "lodash": "4.17.20"
+    "lodash": "4.17.21"
   }
 }
